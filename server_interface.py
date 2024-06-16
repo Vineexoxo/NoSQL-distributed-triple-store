@@ -6,7 +6,7 @@ class TripleStore(ABC):
         pass
 
     @abstractmethod
-    def update(self, subject, predicate, obj):
+    def update(self, subject, predicate, obj,current_timestamp):
         pass
     def fetch_logs(self):
         pass

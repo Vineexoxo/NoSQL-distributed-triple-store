@@ -1,13 +1,9 @@
-import psycopg2
-from server_interface import TripleStore
-from postgres_triple_store import \
-    MySQLTripleStore  # Assuming your PostgresTripleStore class is defined in a separate module
 import subprocess
 from datetime import datetime
 from server_interface import TripleStore
+from postgres_triple_store import MySQLTripleStore
 from MongDB_store import MongoDBTripleStore
-
-import mysql.connector
+from hive_triple_store import HiveTripleStore
 
 def start_mongodb_server():
     # Start MongoDB server using subprocess
@@ -15,41 +11,92 @@ def start_mongodb_server():
     subprocess.Popen(["mongod"])  # Adjust the command as per your MongoDB installation
 
 def main():
-    # Initialize PostgresTripleStore with your database credentials
+    # Create MongoDB, MySQL, and Hive triple stores
     mongodb_triple_store = MongoDBTripleStore(dbname="triples", host="localhost", port=27017)
-
-    # Example usage of query method
-    mongodb_triple_store.load_tsv_file(r"C:\Users\shahi\OneDrive\Documents\data.txt")
-    results = mongodb_triple_store.query("hi", "hey")
-    print("Query Results:", results)
-
-    # Example usage of update method
-    mongodb_triple_store.update("hi", "hey", "new_object_value")
-    print("Update Successful")
-
     dbname = "triples"
     user = "root"
     password = "Shishir@123"
-    host = "localhost"  # Replace "your_host" with your actual host
-    port = 3306  # Assuming your port is 8000, change it if it's different
-
-
+    host = "localhost"
+    port = 3306
     triple_store = MySQLTripleStore(dbname, user, password, host, port)
+    hive_triple_store = HiveTripleStore()
 
-    # Example usage of query method
-    # triple_store.load_tsv_file(r"C:\Users\shahi\OneDrive\Documents\data.txt")
+    # Loading the TSV files
+    mongodb_triple_store.load_tsv_file(r"C:\Users\shahi\OneDrive\Documents\data.txt")
+    triple_store.load_tsv_file(r"C:\Users\shahi\OneDrive\Documents\data.txt")
 
+    # Interactive terminal session
+    while True:
+        print("Choose a server to interact with:")
+        print("1. MongoDB")
+        print("2. MySQL")
+        print("3. Hive")
+        print("4. Exit")
 
-    # Example usage of update method
-    triple_store.update("hi", "hey", "new_object_value1")
-    print("Update Successful")
-    results = triple_store.query("hi", "hey")
-    print("Query Results:", results)
-    results1=triple_store.fetch_logs(mongodb_triple_store.server_type)
-    triple_store.merge(mongodb_triple_store)
-    # Example usage of merge method
-    # Implement merge logic in your merge method in PostgresTripleStore class
-    # triple_store.merge(server_id)
+        choice = input("Enter your choice: ")
+
+        if choice == "1":
+            server = mongodb_triple_store
+        elif choice == "2":
+            server = triple_store
+        elif choice == "3":
+            server = hive_triple_store
+        elif choice == "4":
+            triple_store.close_the_server()
+            mongodb_triple_store.close_the_server()
+            hive_triple_store.close_the_server()
+            print("Exiting...")
+            break
+        else:
+            print("Invalid choice.")
+            continue
+
+        print("Choose an action:")
+        print("1. Query")
+        print("2. Update")
+        print("3. Merge")
+        print("4. Exit")
+
+        action = input("Enter your choice: ")
+
+        if action == "1":
+            subject = input("Enter subject: ")
+            predicate = input("Enter predicate: ")
+            results = server.query(subject, predicate)
+            print("Query Results:", results)
+        elif action == "2":
+            subject = input("Enter subject: ")
+            predicate = input("Enter predicate: ")
+            obj = input("Enter object: ")
+            current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            server.update(subject, predicate, obj,current_timestamp)
+            print("Update Successful")
+        elif action == "3":
+            server_id = input("Enter server ID (mongo/mysql/hive): ")
+            if server_id == server.server_id:
+                print("Invalid: Can't merge the server with itself")
+                continue
+            elif server_id == "mongo":
+                server.merge(mongodb_triple_store)
+                mongodb_triple_store.merge(server)
+            elif server_id == "mysql":
+                server.merge(triple_store)
+                triple_store.merge(server)
+            elif server_id == "hive":
+                server.merge(hive_triple_store)
+                hive_triple_store.merge(server)
+            else:
+                print("Invalid server ID")
+                continue
+
+            print("Merge Successful")
+        elif action == "4":
+            triple_store.close_the_server()
+            mongodb_triple_store.close_the_server()
+            print("Exiting...")
+            break
+        else:
+            print("Invalid choice.")
 
 
 if __name__ == "__main__":

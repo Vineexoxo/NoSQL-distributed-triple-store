@@ -1,97 +1,132 @@
 from datetime import datetime
-import pymongo
+from pymongo import MongoClient
 from server_interface import TripleStore
 
 class MongoDBTripleStore(TripleStore):
-    def __init__(self, dbname, host, port):
-        self.server_type="mongo"
-        self.client = pymongo.MongoClient(host, port)
+    def __init__(self, dbname, host='localhost', port=27017):
+        self.server_id = "mongodb"
+        self.client = MongoClient(host, port)
         self.db = self.client[dbname]
-        self.triples_collection = self.db['triples']
+        self.curr_log = 1
+        self.curr_lim = 1
 
     def query(self, subject, predicate):
-        return list(self.triples_collection.find({"subject": subject, "predicate": predicate}))
+        collection = self.db['triples']
+        return collection.find({"subject": subject, "predicate": predicate})
 
-    def update(self, subject, predicate, obj):
+    def update_merge_log(self, server_id):
+        collection = self.db['mergelog']
         current_timestamp = datetime.now()
-        result = self.triples_collection.update_one(
-            {"subject": subject, "predicate": predicate},
-            {"$set": {"object": obj, "timestamp": current_timestamp}},
-            upsert=True  # Insert if the document does not exist
-        )
-        print(result)
-        # Log the update
-        self.db['log'].insert_one({
-            "subject": subject,
-            "predicate": predicate,
-            "object": obj,
-            "timestamp": current_timestamp
-        })
+        last_merged_log_table = self.curr_log
+        log_entry = {"server_id": server_id, "timestamp": current_timestamp, "last_merged_log_table": last_merged_log_table}
+        collection.insert_one(log_entry)
+
     def fetch_logs(self, server_id):
-        current_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        last_merge_timestamp = self.db['merge_log'].find_one({"server_id": server_id}, sort=[("timestamp", pymongo.DESCENDING)])
+        collection = self.db['mergelog']
+        last_merge_log = collection.find_one({"server_id": server_id}, sort=[("timestamp", -1)])
+        last_merge_timestamp = last_merge_log['timestamp'] if last_merge_log else datetime.min
+        print(last_merge_timestamp)
+        logs = []
+        val=1
+        if last_merge_log:
+            val=last_merge_log['last_merged_log_table']
+        for i in range(val, self.curr_log + 1):
+            print("i ", i)
+            collection_name = 'log{}'.format(i)
+            print("collection_name ", collection_name)
+            log_collection = self.db[collection_name]
+            log_entries = log_collection.find()
+            for x in log_entries:
+                print("x: ", x)
+                logs.append((x['subject'], x['predicate'], x['object'], x['timestamp']))
+        self.update_merge_log(server_id)
+        return logs
 
-        triplets = []
+    def make_log_collection(self):
+        collection_name = 'log{}'.format(self.curr_log)
+        self.db.create_collection(collection_name)
 
-        if last_merge_timestamp:
-            last_merge_timestamp = last_merge_timestamp["timestamp"]
+    def delete_entry(self, log_current, subject, predicate):
+        collection_name = 'log{}'.format(log_current)
+        collection = self.db[collection_name]
+        collection.delete_many({"subject": subject, "predicate": predicate})
 
-            # Fetch logs from the database
-            logs = self.db['log'].find({"timestamp": {"$gt": last_merge_timestamp}})
-
-            # Update merge log timestamp
-            self.db['merge_log'].update_one({"server_id": server_id}, {"$set": {"timestamp": current_timestamp}})
-
-            # Iterate over each log entry and create triplets
-            for log in logs:
-                triplet = (log["subject"], log["predicate"], log["object"], log["timestamp"])
-                triplets.append(triplet)
-
+    def update(self, subject, predicate, obj,current_timestamp):
+        collection = self.db['triples']
+        log_collection_name = 'log{}'.format(self.curr_log)
+        log_collection = self.db[log_collection_name]
+        # current_timestamp = datetime.now()
+        triple_entry = {"subject": subject, "predicate": predicate, "object": obj, "timestamp": current_timestamp, "log": self.curr_log}
+        log_entry = {"subject": subject, "predicate": predicate, "object": obj, "timestamp": current_timestamp}
+        
+        triples_result = collection.count_documents({"subject": subject, "predicate": predicate})
+        if triples_result != 0:
+            log_entry_result = collection.find_one({"subject": subject, "predicate": predicate}, {"log": 1})
+            log_entry_log = log_entry_result.get("log", -1)
+            if log_entry_log == -1:
+                log_count = log_collection.count_documents({})
+                if log_count >= self.curr_lim:
+                    self.curr_log += 1
+                    self.make_log_collection()
+                    log_collection_name = 'log{}'.format(self.curr_log)
+                    log_collection = self.db[log_collection_name]
+                    log_collection.insert_one(log_entry)
+                else:
+                    log_collection.insert_one(log_entry)
+            else:
+                self.delete_entry(log_entry_log, subject, predicate)
+                log_count = log_collection.count_documents({})
+                if log_count >= self.curr_lim:
+                    self.curr_log += 1
+                    self.make_log_collection()
+                    log_collection_name = 'log{}'.format(self.curr_log)
+                    log_collection = self.db[log_collection_name]
+                    log_collection.insert_one(log_entry)
+                else:
+                    log_collection.insert_one(log_entry)
         else:
-            # If there are no previous merge timestamps, fetch all logs
-            logs = self.db['log'].find()
+            log_count = log_collection.count_documents({})
+            if log_count >= self.curr_lim:
+                self.curr_log += 1
+                self.make_log_collection()
+                log_collection_name = 'log{}'.format(self.curr_log)
+                log_collection = self.db[log_collection_name]
+                log_collection.insert_one(log_entry)
+            else:
+                log_collection.insert_one(log_entry)
+            collection.insert_one(triple_entry)
 
-            # Insert new entry in merge log
-            self.db['merge_log'].insert_one({"server_id": server_id, "timestamp": current_timestamp})
-
-            # Iterate over each log entry and create triplets
-            for log in logs:
-                triplet = (log["subject"], log["predicate"], log["object"], log["timestamp"])
-                triplets.append(triplet)
-
-        return triplets
     def merge(self, server_object):
-        log_entries=server_object.fetch_log(self.server_type)
+        log_entries = server_object.fetch_logs(self.server_id)
         for log_entry in log_entries:
             subject, predicate, obj, timestamp = log_entry
-
-            # Check if the entry already exists in the main collection based on subject and predicate
-            existing_entry = self.main_collection.find_one({"subject": subject, "predicate": predicate})
-
-            if existing_entry:
-                # Check if the existing entry's timestamp is older than the new log entry's timestamp
-                if existing_entry["timestamp"] < timestamp:
-                    # Entry exists and its timestamp is older, update it with the new object and timestamp
-                    self.main_collection.update_one({"_id": existing_entry["_id"]},
-                                                    {"$set": {"object": obj, "timestamp": timestamp}})
-            else:
-                # Entry does not exist, insert a new document
-                self.main_collection.insert_one({"subject": subject, "predicate": predicate, "object": obj, "timestamp": timestamp})
-
+            self.update(subject, predicate, obj, timestamp)
 
     def load_tsv_file(self, file_path):
-        current_timestamp = datetime.now()
+        collection = self.db['triples']
         with open(file_path, 'r', encoding='utf-8') as file:
             lines = file.readlines()
             for line in lines:
                 data = line.strip().split(' ')
+                # print(data)
                 if len(data) == 3:
                     subject, predicate, obj = data
-                    self.triples_collection.update_one(
-                        {"subject": subject, "predicate": predicate},
-                        {"$set": {"object": obj, "timestamp": current_timestamp}},
-                        upsert=True
-                    )
+                    current_timestamp = datetime.now()
+                    triple_entry = {"subject": subject, "predicate": predicate, "object": obj, "timestamp": current_timestamp, "log": -1}
+                    collection.insert_one(triple_entry)
                 else:
                     print(f"Ignore line: {line.strip()}. Not in the format 'subject predicate object'.")
 
+    def drop_collection(self, server_id):
+        collection_name = "log" + str(server_id)
+        self.db[collection_name].drop()
+    def close_the_server(self):
+        for i in range(self.curr_log + 1):
+            self.drop_collection(i)
+        collection =self.db['mergelog']
+        result = collection.delete_many({})
+        print("Number of documents deleted:", result.deleted_count)
+        collection =self.db['triples']
+        result = collection.delete_many({})
+        print("Number of documents deleted:", result.deleted_count)
+        
